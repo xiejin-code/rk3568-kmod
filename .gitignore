@@ -1,0 +1,9 @@
+src/**/*.o
+src/**/*.o.cmd
+src/**/*.ko
+src/**/*.ko.cmd
+src/**/*.mod.c
+src/**/*.dwo
+src/**/.tmp_versions/
+src/**/Module.symvers
+src/**/modules.order

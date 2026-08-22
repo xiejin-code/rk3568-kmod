@@ -1,0 +1,4 @@
+obj-m += ap3216c/
+
+#any common include directory can go under this
+subdir-ccflags-y += -Werror -I$(src)/include
