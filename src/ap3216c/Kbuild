@@ -1,0 +1,2 @@
+# Only generate ap3216c.o. Use ap3216c.o to generate ap3216c.ko
+obj-m := ap3216c.o
