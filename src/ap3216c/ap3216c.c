@@ -2,6 +2,81 @@
 
 #include "ap3216c.h"
 
+static int ap3216c_read_raw(struct iio_dev *indio_dev,
+        struct iio_chan_spec const *chan, int *val, int *val2, long mask) {
+    
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    switch(mask) {
+        case IIO_CHAN_INFO_RAW:
+            switch(chan->address) {
+                case AP3216C_CHANNEL_ALS:
+                    // read_als(ddata);
+                    return IIO_VAL_INT;
+                case AP3216C_CHANNEL_PS:
+                    // read_ps(ddata);
+                    return IIO_VAL_INT;
+                case AP3216C_CHANNEL_IR:
+                    // read_ir(ddata);
+                    return IIO_VAL_INT;
+                default:
+                    return -EINVAL;
+            }
+        break;
+    }
+    return -EINVAL;
+}
+
+static int ap3216c_write_raw(struct iio_dev *indio_dev,
+        struct iio_chan_spec const *chan, int val, int val2, long mask) {
+    return -EINVAL;
+}
+
+static ssize_t ap3216c_show_mode(struct device *dev,
+        struct device_attribute *attr, char *buf) {
+
+}
+
+static ssize_t ap3216c_store_mode(struct device *dev,
+        struct device_attribute *attr, const char *buf, size_t count) {
+            
+}
+
+static IIO_DEVICE_ATTR(mode, 0644, ap3216c_show_mode, ap3216c_store_mode, 0);
+
+static struct attribute *ap3216c_attributes[] = {
+    &iio_dev_attr_mode.dev_attr.attr,
+    NULL,
+};
+
+static struct attribute_group ap3216c_attr_group = {
+    .attrs = ap3216c_attributes,
+};
+
+static const struct iio_info ap3216c_info = {
+    .attrs = &ap3216c_attr_group,
+    .read_raw = ap3216c_read_raw,
+};
+
+static const struct iio_chan_spec ap3216c_channels[] = {
+    {
+        .type = IIO_LIGHT,
+        .address = AP3216C_CHANNEL_ALS,
+        .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+    },
+    {
+        .type = IIO_PROXIMITY,
+        .address = AP3216C_CHANNEL_PS,
+        .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+    },
+    {
+        .type = IIO_INTENSITY,
+        .modified = 1,
+        .channel2 = IIO_MOD_LIGHT_IR,
+        .address = AP3216C_CHANNEL_IR,
+        .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+    },
+};
+
 static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *id) {
     struct device *dev = &client->dev;
     if(i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
@@ -10,19 +85,34 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     }
 
     struct ap3216c_dev *ddata;
-    /* Allocate memory for the device private data */
-    ddata = devm_kzalloc(dev, sizeof(struct ap3216c_dev, GFP_KERNEL));
-    if(!ddata) {
-        dev_err(dev, "Failed to allocate memory\n");
+    struct iio_dev *indio_dev;
+    /* Use IIO device api to allocate memory for the device private data */
+    indio_dev = devm_iio_device_alloc(dev, sizeof(struct ap3216c_dev));
+    if(!indio_dev) {
+        dev_err(dev, "Failed to allocate IIO devicememory\n");
         return -ENOMEM;
     }
 
     /* initialize the device private data */
+    ddata = iio_priv(indio_dev);
     ddata->client = client;
 
+    /* initialize the IIO device */
+    indio_dev->info = &ap3216c_info;
+    indio_dev->name = "ap3216c";
+    indio_dev->modes = INDIO_DIRECT_MODE;
+    indio_dev->channels = ap3216c_channels;
+    indio_dev->num_channels = ARRAY_SIZE(ap3216c_channels);
+    indio_dev->dev.parent = dev;
+    // indio_dev->event_attrs = ap3216c_event_attrs;
+    // indio_dev->num_event_attrs = ARRAY_SIZE(ap3216c_event_attrs);
+
     /* register the device private data to the client */
-    i2c_set_clientdata(client, ddata);
+    i2c_set_clientdata(client, indio_dev);
     mutex_init(&ddata->mixer_placeholder);
+
+    /* register the IIO device */
+    devm_iio_device_register(dev, indio_dev);
     return 0;
 }
 

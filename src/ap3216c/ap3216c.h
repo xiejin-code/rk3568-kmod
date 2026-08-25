@@ -38,11 +38,18 @@
 #define AP3216C_PS_HIGH_THRESHOLD_LOW_REG       0x2C    /* bit 2:0 */
 #define AP3216C_PS_HIGH_THRESHOLD_HIGH_REG      0x2D    /* bit 10:3 */
 
+enum ap3216c_channel_addr {
+    AP3216C_CHANNEL_ALS,
+    AP3216C_CHANNEL_PS,
+    AP3216C_CHANNEL_IR,
+};
+
 struct ap3216c_dev {
     struct i2c_client *client;  /* i2c device model */
     struct mutex mixer_placeholder;    /* placeholder for the mixer */
 
     int irq;                    /* interrupt */
+    u8 mode;                    /* working mode */
     u16 als_data;               /* ambient light sensor data */
     u16 ps_data;                /* proximity sensor data */
     u16 ir_data;                /* infrared sensor data */
