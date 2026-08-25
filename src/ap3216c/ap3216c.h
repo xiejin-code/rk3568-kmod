@@ -39,10 +39,20 @@
 #define AP3216C_PS_HIGH_THRESHOLD_HIGH_REG      0x2D    /* bit 10:3 */
 
 struct ap3216c_dev {
-    struct i2c_client *client;
-    struct device *dev;
-    const struct i2c_device_id *id_info; /* private data to the driver */
+    struct i2c_client *client;  /* i2c device model */
+    struct mutex mixer_placeholder;    /* placeholder for the mixer */
+
+    int irq;                    /* interrupt */
+    u16 als_data;               /* ambient light sensor data */
+    u16 ps_data;                /* proximity sensor data */
+    u16 ir_data;                /* infrared sensor data */
 };
+
+#define AP3216_DEVICE_ID 0x00
+static const struct ap3216c_chip_info ap3216c_chip = {
+    .id = AP3216_DEVICE_ID,
+};
+
 #endif /* __KERNEL__ */
 
 #endif /* AP3216C_H */
