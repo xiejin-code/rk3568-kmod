@@ -56,6 +56,20 @@ static const int ap3216c_als_scale_microlux[] = {
     4900,
 };
 
+struct ap3216c_als_persistence_map {
+    u8 value; /* N -- als persistence time */
+    u8 reg_code; /* reg_code -- register code */
+};
+
+static const struct ap3216c_als_persistence_map ap3216c_als_persistence[] = {
+    {1, 0x00},
+    {4, 0x01},
+    {8, 0x02},
+    {12, 0x03},
+    {16, 0x04},
+    {60, 0x0f},
+};
+
 struct ap3216c_dev {
     struct i2c_client *client;  /* i2c device model */
     struct mutex lock;    /* lock for the device */

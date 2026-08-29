@@ -68,6 +68,140 @@ static int read_als_scale_microlux(struct ap3216c_dev *ddata, int *val, int *val
     return 0;
 }
 
+static int write_als_scale_microlux(struct ap3216c_dev *ddata, int val, int val2) {
+    
+    if (val != 0)
+        return -EINVAL;
+
+    for (int i = 0; i < ARRAY_SIZE(ap3216c_als_scale_microlux); i++) {
+        if (val2 == ap3216c_als_scale_microlux[i])
+            return ap3216c_update_field(ddata, AP3216C_ALS_CONFIGURATION_REG,
+                AP3216C_ALS_CONF_RANGE_MASK, i);
+    }
+    return -EINVAL;
+}
+
+static int write_als_threshold(struct ap3216c_dev *ddata, enum iio_event_direction dir,
+                                int val, int val2) {
+
+    u8 lower_byte = val & 0xff;
+    u8 higher_byte = (val >> 8) & 0xff;
+    u8 low_reg, high_reg;
+    int ret;
+    if(val2 != 0 || val < 0 || val > 0xffff)
+        return -EINVAL;
+
+    lower_byte = val & 0xff;
+    higher_byte = (val >> 8) & 0xff;
+    if(dir == IIO_EV_DIR_RISING) {
+        low_reg = AP3216C_ALS_HIGH_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG;
+    }else if(dir == IIO_EV_DIR_FALLING) {
+        low_reg = AP3216C_ALS_LOW_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_ALS_LOW_THRESHOLD_HIGH_REG;
+    }else {
+        return -EINVAL;
+    }
+
+    mutex_lock(&ddata->lock);
+    ret = i2c_smbus_write_byte_data(ddata->client, low_reg, lower_byte);
+    if(ret < 0) {
+        goto out_unlock;
+    }
+    ret = i2c_smbus_write_byte_data(ddata->client, high_reg, higher_byte);
+    if(ret < 0) {
+        goto out_unlock;
+    }
+    /* write success */
+    ret = 0;
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
+static int ap3216c_write_event_value(struct iio_dev *indio_dev,
+        const struct iio_chan_spec *chan, enum iio_event_type type,
+        enum iio_event_direction dir, enum iio_event_info info, int val, int val2) {
+
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    switch(chan->address) {
+        case AP3216C_CHANNEL_ALS:
+            switch(type) {
+                case IIO_EV_TYPE_THRESH:
+                    if(info == IIO_EV_INFO_VALUE)
+                        return write_als_threshold(ddata, dir, val, val2);
+            }
+    }
+    return -EINVAL;
+}
+
+static int read_als_threshold(struct ap3216c_dev *ddata,
+                                enum iio_event_direction dir,
+                                int *val, int *val2)
+{
+    u8 low_reg, high_reg;
+    int lower_byte, higher_byte;
+    int ret = 0;
+
+    switch (dir) {
+        case IIO_EV_DIR_RISING:
+            low_reg = AP3216C_ALS_HIGH_THRESHOLD_LOW_REG;
+            high_reg = AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG;
+        break;
+
+        case IIO_EV_DIR_FALLING:
+            low_reg = AP3216C_ALS_LOW_THRESHOLD_LOW_REG;
+            high_reg = AP3216C_ALS_LOW_THRESHOLD_HIGH_REG;
+        break;
+
+        default:
+            return -EINVAL;
+    }
+
+    mutex_lock(&ddata->lock);
+
+    lower_byte = i2c_smbus_read_byte_data(ddata->client, low_reg);
+    if (lower_byte < 0) {
+        ret = lower_byte;
+        goto out_unlock;
+    }
+
+    higher_byte = i2c_smbus_read_byte_data(ddata->client, high_reg);
+    if (higher_byte < 0) {
+        ret = higher_byte;
+        goto out_unlock;
+    }
+
+    *val = (higher_byte << 8) | lower_byte;
+    *val2 = 0;
+
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
+static int ap3216c_read_event_value(struct iio_dev *indio_dev,
+        const struct iio_chan_spec *chan, enum iio_event_type type,
+        enum iio_event_direction dir, enum iio_event_info info, int *val, int *val2) {
+    
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    int ret;
+    switch(chan->address) {
+        case AP3216C_CHANNEL_ALS:
+            switch(type) {
+                case IIO_EV_TYPE_THRESH:
+                    if(info == IIO_EV_INFO_VALUE){
+                        ret = read_als_threshold(ddata, dir, val, val2);
+                        if(ret < 0)
+                            return ret;
+                        else
+                            return IIO_VAL_INT;
+                    }
+            }
+    }
+    return -EINVAL;
+}
+
 static int ap3216c_read_raw(struct iio_dev *indio_dev,
         struct iio_chan_spec const *chan, int *val, int *val2, long mask) {
 
@@ -104,19 +238,6 @@ static int ap3216c_read_raw(struct iio_dev *indio_dev,
     return -EINVAL;
 }
 
-static int write_als_scale_microlux(struct ap3216c_dev *ddata, int val, int val2) {
-    
-    if (val != 0)
-        return -EINVAL;
-
-    for (int i = 0; i < ARRAY_SIZE(ap3216c_als_scale_microlux); i++) {
-        if (val2 == ap3216c_als_scale_microlux[i])
-            return ap3216c_update_field(ddata, AP3216C_ALS_CONFIGURATION_REG,
-                AP3216C_ALS_CONF_RANGE_MASK, i);
-    }
-    return -EINVAL;
-}
-
 static int ap3216c_write_raw(struct iio_dev *indio_dev,
         struct iio_chan_spec const *chan, int val, int val2, long mask) {
     
@@ -127,16 +248,14 @@ static int ap3216c_write_raw(struct iio_dev *indio_dev,
                 switch(mask) {
                     case IIO_CHAN_INFO_SCALE:
                         return write_als_scale_microlux(ddata, val, val2);
-                    default:
-                        return -EINVAL;
                 }
-                return IIO_VAL_INT;
+                return -EINVAL;
             case AP3216C_CHANNEL_PS:
                 // write_ps(ddata);
-                return EINVAL;
+                return -EINVAL;
             case AP3216C_CHANNEL_IR:
                 // write_ir(ddata);
-                return EINVAL;
+                return -EINVAL;
             default:
                 return -EINVAL;
         }
@@ -184,10 +303,10 @@ static ssize_t ap3216c_store_mode(struct device *dev,
     
     struct iio_dev *indio_dev = dev_to_iio_dev(dev);
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    unsigned int mode;
+    u8 mode;
     int ret;
 
-    ret = kstrtouint(buf, 0, &mode);
+    ret = kstrtou8(buf, 0, &mode);
     if(ret < 0) {
         return ret;
     }
@@ -203,8 +322,55 @@ static ssize_t ap3216c_store_mode(struct device *dev,
 
 static IIO_DEVICE_ATTR(mode, 0644, ap3216c_show_mode, ap3216c_store_mode, 0); /* attribute mode: show and store the mode */
 
+/* attribute persistence: show and store ALS persistence time */
+static ssize_t ap3216c_show_als_persistence(struct device *dev,
+        struct device_attribute *attr, char *buf) {
+    
+    struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    struct i2c_client *client = ddata->client;
+    int ret;
+
+    ret = i2c_smbus_read_byte_data(client, AP3216C_ALS_CONFIGURATION_REG);
+    if(ret < 0) {
+        return ret;
+    }
+
+    ret &= AP3216C_ALS_CONF_PERSIST_MASK;
+    return sysfs_emit(buf, "%d\n", ret);
+}
+
+static ssize_t ap3216c_store_als_persistence(struct device *dev,
+        struct device_attribute *attr, const char *buf, size_t count) {
+    
+    struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    u8 als_persistence;
+    int ret;
+
+    ret = kstrtou8(buf, 0, &als_persistence);
+    if(ret < 0) {
+        return ret;
+    }
+
+    for (int i = 0; i < ARRAY_SIZE(ap3216c_als_persistence); i++) {
+        if (als_persistence == ap3216c_als_persistence[i].value){
+            ret = ap3216c_update_field(ddata, AP3216C_ALS_CONFIGURATION_REG,
+                AP3216C_ALS_CONF_PERSIST_MASK, ap3216c_als_persistence[i].reg_code);
+            if(ret < 0) {
+                return ret;
+            }
+            return count;
+        }
+    }
+    return -EINVAL;
+}
+
+static IIO_DEVICE_ATTR(als_persistence, 0644, ap3216c_show_als_persistence, ap3216c_store_als_persistence, 0);/* attribute persistence: show and store ALS persistence time */
+
 static struct attribute *ap3216c_attributes[] = {
     &iio_dev_attr_mode.dev_attr.attr,
+    &iio_dev_attr_als_persistence.dev_attr.attr,
     NULL,
 };
 
@@ -214,8 +380,24 @@ static struct attribute_group ap3216c_attr_group = {
 
 static const struct iio_info ap3216c_info = {
     .attrs = &ap3216c_attr_group,
+    .write_raw_get_fmt = ap3216c_write_raw_get_fmt,/* only be used to set the format of the raw_data() function */
     .read_raw = ap3216c_read_raw,
-    .write_raw_get_fmt = ap3216c_write_raw_get_fmt,
+    .write_raw = ap3216c_write_raw,
+    .write_event_value = ap3216c_write_event_value,
+    .read_event_value = ap3216c_read_event_value,
+};
+
+static const struct iio_event_spec ap3216c_event_spec[] = {
+    {
+        .type = IIO_EV_TYPE_THRESH,
+        .dir = IIO_EV_DIR_RISING,
+        .mask_separate = BIT(IIO_EV_INFO_VALUE),
+    },
+    {
+        .type = IIO_EV_TYPE_THRESH,
+        .dir = IIO_EV_DIR_FALLING,
+        .mask_separate = BIT(IIO_EV_INFO_VALUE),
+    },
 };
 
 static const struct iio_chan_spec ap3216c_channels[] = {
@@ -223,6 +405,8 @@ static const struct iio_chan_spec ap3216c_channels[] = {
         .type = IIO_LIGHT,
         .address = AP3216C_CHANNEL_ALS,
         .info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_SCALE),
+        .event_spec = ap3216c_event_spec,
+        .num_event_specs = ARRAY_SIZE(ap3216c_event_spec),
     },
     {
         .type = IIO_PROXIMITY,
@@ -266,8 +450,8 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     indio_dev->channels = ap3216c_channels;
     indio_dev->num_channels = ARRAY_SIZE(ap3216c_channels);
     indio_dev->dev.parent = dev;
-    // indio_dev->event_attrs = ap3216c_event_attrs;
-    // indio_dev->num_event_attrs = ARRAY_SIZE(ap3216c_event_attrs);
+    indio_dev->event_attrs = ap3216c_event_attrs;
+    indio_dev->num_event_attrs = ARRAY_SIZE(ap3216c_event_attrs);
 
     /* register the device private data to the client */
     i2c_set_clientdata(client, indio_dev);
@@ -291,7 +475,7 @@ static const struct i2c_device_id ap3216c_id[] = {
 
 /* Device Tree ID table */
 static const struct of_device_id ap3216c_DT_id[] = {
-    { .compatible = "smartChai,ap3216c", .data = &ap3216c_chip},
+    { .compatible = "smartchai,ap3216c", .data = &ap3216c_chip},
     { }
 };
 
