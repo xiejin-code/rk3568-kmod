@@ -2,7 +2,7 @@
 
 #include "ap3216c.h"
 
-static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, int mask, int value) {
+static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, const int mask, int value) {
     
     int ret;
     u8 reg_value;
@@ -368,6 +368,63 @@ static ssize_t ap3216c_store_als_persistence(struct device *dev,
 
 static IIO_DEVICE_ATTR(als_persistence, 0644, ap3216c_show_als_persistence, ap3216c_store_als_persistence, 0);/* attribute persistence: show and store ALS persistence time */
 
+/*hard interrupt handler*/
+static irqreturn_t ap3216c_irq_handler(int irq, void *dev_id) {
+    /* placeholder for hard interrupt handler*/
+    struct iio_dev *indio_dev = dev_id;
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    ddata->irq_timestamp = iio_get_time_ns(indio_dev);
+    return IRQ_WAKE_THREAD;
+}
+
+/* thread interrupt handler */
+static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
+    struct iio_dev *indio_dev = dev_id;
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    int irq_status, ret;
+
+    mutex_lock(&ddata->lock);
+    irq_status = i2c_smbus_read_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG);
+    if(irq_status < 0) {
+        mutex_unlock(&ddata->lock);
+        dev_err_ratelimited(&ddata->client->dev,
+            "failed to read interrupt status: %d\n",
+            irq_status);
+        return IRQ_HANDLED;
+    }
+
+    /* clear the interrupt status register AP3216C_INTERRUPT_STATUS_REG.
+     * There are two ways to clear the interrupt status:
+     * 1. Write 1 to the interrupt status register AP3216C_CLEAR_INT_REG. Then write
+     * mask to the interrupt status register AP3216C_INTERRUPT_STATUS_REG.
+     * 2. Read the data register(AP3216C_ALS_DATA_*_REG or AP3216C_PS_DATA_*_REG) if
+     * the AP3216C_CLEAR_INT_REG is 0, the interrupt status will be cleared automatically.
+    */
+    /* We use No.1 method to clear the interrupt status */
+    ret = i2c_smbus_write_byte_data(ddata->client, AP3216C_CLEAR_INT_REG, 1);
+    if(irq_status & AP3216C_ALS_INT_MASK) {
+        ret |=i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_ALS_INT_MASK);
+        iio_push_event(indio_dev,
+            IIO_UNMOD_EVENT_CODE(IIO_LIGHT,
+                            0,
+                            IIO_EV_TYPE_THRESH,
+                            IIO_EV_DIR_EITHER),
+                            ddata->irq_timestamp);
+    }else if(irq_status & AP3216C_PS_INT_MASK) {
+        i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_PS_INT_MASK);
+        /* placeholder for PS interrupt handler*/
+    }
+
+    if(ret) {
+        dev_err_ratelimited(&ddata->client->dev,
+            "failed to clear interrupt status: %d\n",
+            ret);
+    }
+
+    mutex_unlock(&ddata->lock);
+    return IRQ_HANDLED;
+}
+
 static struct attribute *ap3216c_attributes[] = {
     &iio_dev_attr_mode.dev_attr.attr,
     &iio_dev_attr_als_persistence.dev_attr.attr,
@@ -403,6 +460,7 @@ static const struct iio_event_spec ap3216c_event_spec[] = {
 static const struct iio_chan_spec ap3216c_channels[] = {
     {
         .type = IIO_LIGHT,
+        .channel = 0,
         .address = AP3216C_CHANNEL_ALS,
         .info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_SCALE),
         .event_spec = ap3216c_event_spec,
@@ -410,11 +468,13 @@ static const struct iio_chan_spec ap3216c_channels[] = {
     },
     {
         .type = IIO_PROXIMITY,
+        .channel = 0,
         .address = AP3216C_CHANNEL_PS,
         .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
     },
     {
         .type = IIO_INTENSITY,
+        .channel = 0,
         .modified = 1,
         .channel2 = IIO_MOD_LIGHT_IR,
         .address = AP3216C_CHANNEL_IR,
@@ -432,7 +492,7 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     int ret;
     struct ap3216c_dev *ddata;
     struct iio_dev *indio_dev;
-    /* Use IIO device api to allocate memory for the device private data */
+    /* Use IIO device api to request IIO dev object and request extra memory for the device private data */
     indio_dev = devm_iio_device_alloc(dev, sizeof(struct ap3216c_dev));
     if(!indio_dev) {
         dev_err(dev, "Failed to allocate IIO devicememory\n");
@@ -450,16 +510,20 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     indio_dev->channels = ap3216c_channels;
     indio_dev->num_channels = ARRAY_SIZE(ap3216c_channels);
     indio_dev->dev.parent = dev;
-    indio_dev->event_attrs = ap3216c_event_attrs;
-    indio_dev->num_event_attrs = ARRAY_SIZE(ap3216c_event_attrs);
 
     /* register the device private data to the client */
     i2c_set_clientdata(client, indio_dev);
     mutex_init(&ddata->lock);
+
     /* register the IIO device */
     ret = devm_iio_device_register(dev, indio_dev);
     if (ret)
         return dev_err_probe(dev, ret, "failed to register IIO device\n");
+    
+    ret = devm_request_threaded_irq(dev, client->irq, ap3216c_irq_handler, ap3216c_irq_thread_fn,
+                                    IRQF_ONESHOT, "ap3216c", indio_dev);
+    if (ret)
+        return dev_err_probe(dev, ret, "failed to request IRQ\n");
 
     return 0;
 }

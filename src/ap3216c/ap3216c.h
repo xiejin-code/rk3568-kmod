@@ -42,6 +42,8 @@
 #define AP3216C_MODE_MASK                       GENMASK(2, 0)
 #define AP3216C_ALS_CONF_PERSIST_MASK           GENMASK(3, 0)
 #define AP3216C_ALS_CONF_RANGE_MASK             GENMASK(5, 4)
+#define AP3216C_ALS_INT_MASK                    BIT(0)
+#define AP3216C_PS_INT_MASK                     BIT(1)
 
 enum ap3216c_channel_addr {
     AP3216C_CHANNEL_ALS,
@@ -73,6 +75,7 @@ static const struct ap3216c_als_persistence_map ap3216c_als_persistence[] = {
 struct ap3216c_dev {
     struct i2c_client *client;  /* i2c device model */
     struct mutex lock;    /* lock for the device */
+    s64 irq_timestamp;        /* timestamp for the interrupt */
 
     int irq;                    /* interrupt */
     u16 als_data;               /* ambient light sensor data */
