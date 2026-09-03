@@ -42,6 +42,12 @@
 #define AP3216C_MODE_MASK                       GENMASK(2, 0)
 #define AP3216C_ALS_CONF_PERSIST_MASK           GENMASK(3, 0)
 #define AP3216C_ALS_CONF_RANGE_MASK             GENMASK(5, 4)
+#define AP3216C_IR_DATA_LOW_MASK                GENMASK(1, 0)
+#define AP3216C_PS_DATA_LOW_MASK                GENMASK(3, 0)
+#define AP3216C_PS_DATA_HIGH_MASK               GENMASK(5, 0)
+#define AP3216C_PS_THRESHOLD_LOW_MASK           GENMASK(1, 0)
+#define AP3216C_PS_IROF_MASK                    BIT(6)
+#define AP3216C_PS_OBJ_MASK                     BIT(7)
 #define AP3216C_ALS_INT_MASK                    BIT(0)
 #define AP3216C_PS_INT_MASK                     BIT(1)
 
@@ -51,42 +57,13 @@ enum ap3216c_channel_addr {
     AP3216C_CHANNEL_IR,
 };
 
-static const int ap3216c_als_scale_microlux[] = {
-    350000,
-    78800,
-    19700,
-    4900,
-};
-
-struct ap3216c_als_persistence_map {
-    u8 value; /* N -- als persistence time */
-    u8 reg_code; /* reg_code -- register code */
-};
-
-static const struct ap3216c_als_persistence_map ap3216c_als_persistence[] = {
-    {1, 0x00},
-    {4, 0x01},
-    {8, 0x02},
-    {12, 0x03},
-    {16, 0x04},
-    {60, 0x0f},
-};
-
 struct ap3216c_dev {
     struct i2c_client *client;  /* i2c device model */
     struct mutex lock;    /* lock for the device */
     s64 irq_timestamp;        /* timestamp for the interrupt */
-
-    int irq;                    /* interrupt */
-    u16 als_data;               /* ambient light sensor data */
-    u16 ps_data;                /* proximity sensor data */
-    u16 ir_data;                /* infrared sensor data */
 };
 
 #define AP3216_DEVICE_ID 0x00
-static const struct ap3216c_chip_info ap3216c_chip = {
-    .id = AP3216_DEVICE_ID,
-};
 
 #endif /* __KERNEL__ */
 

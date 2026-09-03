@@ -1,6 +1,46 @@
+#include <linux/bitfield.h>
+#include <linux/bits.h>
 #include <linux/i2c.h>
+#include <linux/interrupt.h>
+#include <linux/mod_devicetable.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/delay.h>
+
+#include <linux/iio/events.h>
+#include <linux/iio/iio.h>
+#include <linux/iio/sysfs.h>
 
 #include "ap3216c.h"
+
+static const int ap3216c_als_scale_microlux[] = {
+    350000,
+    78800,
+    19700,
+    4900,
+};
+
+struct ap3216c_als_persistence_map {
+    u8 value; /* N -- als persistence time */
+    u8 reg_code; /* reg_code -- register code */
+};
+
+static const struct ap3216c_als_persistence_map ap3216c_als_persistence[] = {
+    {1, 0x00},
+    {4, 0x01},
+    {8, 0x02},
+    {12, 0x03},
+    {16, 0x04},
+    {60, 0x0f},
+};
+
+struct ap3216c_chip_info {
+    int id;
+};
+
+static const struct ap3216c_chip_info ap3216c_chip = {
+    .id = AP3216_DEVICE_ID,
+};
 
 static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, const int mask, int value) {
     
@@ -31,41 +71,103 @@ out_unlock:
 }
 
 static int read_als_data(struct ap3216c_dev *ddata, int *val) {
-    
     struct i2c_client *client = ddata->client;
     int als_data_low;
     int als_data_high;
-    
+    int ret = 0;
+
+    mutex_lock(&ddata->lock);
     als_data_low = i2c_smbus_read_byte_data(client, AP3216C_ALS_DATA_LOW_REG);
     if(als_data_low < 0) {
-        return als_data_low;
+        ret = als_data_low;
+        goto out_unlock;
     }
-    
+
     als_data_high = i2c_smbus_read_byte_data(client, AP3216C_ALS_DATA_HIGH_REG);
     if(als_data_high < 0) {
-        return als_data_high;
+        ret = als_data_high;
+        goto out_unlock;
     }
 
     *val = (als_data_high << 8) | als_data_low;
-    return 0;
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
+static int read_ir_data(struct ap3216c_dev *ddata, int *val) {
+    struct i2c_client *client = ddata->client;
+    int ir_data_low;
+    int ir_data_high;
+    int ret = 0;
+
+    mutex_lock(&ddata->lock);
+    ir_data_low = i2c_smbus_read_byte_data(client, AP3216C_IR_DATA_LOW_REG);
+    if(ir_data_low < 0) {
+        ret = ir_data_low;
+        goto out_unlock;
+    }
+
+    ir_data_high = i2c_smbus_read_byte_data(client, AP3216C_IR_DATA_HIGH_REG);
+    if(ir_data_high < 0) {
+        ret = ir_data_high;
+        goto out_unlock;
+    }
+
+    *val = (ir_data_high << 2) | (ir_data_low & AP3216C_IR_DATA_LOW_MASK);
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
+static int read_ps_data(struct ap3216c_dev *ddata, int *val) {
+    struct i2c_client *client = ddata->client;
+    int ps_data_low;
+    int ps_data_high;
+    int ret = 0;
+
+    mutex_lock(&ddata->lock);
+    ps_data_low = i2c_smbus_read_byte_data(client, AP3216C_PS_DATA_LOW_REG);
+    if(ps_data_low < 0) {
+        ret = ps_data_low;
+        goto out_unlock;
+    }
+
+    if(ps_data_low & AP3216C_PS_IROF_MASK) {
+        ret = -ENODATA;
+        goto out_unlock;
+    }
+
+    ps_data_high = i2c_smbus_read_byte_data(client, AP3216C_PS_DATA_HIGH_REG);
+    if(ps_data_high < 0) {
+        ret = ps_data_high;
+        goto out_unlock;
+    }
+
+    *val = ((ps_data_high & AP3216C_PS_DATA_HIGH_MASK) << 4) |
+           (ps_data_low & AP3216C_PS_DATA_LOW_MASK);
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
 }
 
 static int read_als_scale_microlux(struct ap3216c_dev *ddata, int *val, int *val2) {
-
     struct i2c_client *client = ddata->client;
     int ret;
 
+    mutex_lock(&ddata->lock);
     ret = i2c_smbus_read_byte_data(client, AP3216C_ALS_CONFIGURATION_REG);
     if(ret < 0) {
-        return ret;
+        goto out_unlock;
     }
 
-    // ret should be 0, 1, 2, 3
     ret = FIELD_GET(AP3216C_ALS_CONF_RANGE_MASK, ret);
-    
     *val = 0;
     *val2 = ap3216c_als_scale_microlux[ret];
-    return 0;
+    ret = 0;
+out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
 }
 
 static int write_als_scale_microlux(struct ap3216c_dev *ddata, int val, int val2) {
@@ -91,8 +193,6 @@ static int write_als_threshold(struct ap3216c_dev *ddata, enum iio_event_directi
     if(val2 != 0 || val < 0 || val > 0xffff)
         return -EINVAL;
 
-    lower_byte = val & 0xff;
-    higher_byte = (val >> 8) & 0xff;
     if(dir == IIO_EV_DIR_RISING) {
         low_reg = AP3216C_ALS_HIGH_THRESHOLD_LOW_REG;
         high_reg = AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG;
@@ -119,18 +219,70 @@ out_unlock:
     return ret;
 }
 
+static int write_ps_threshold(struct ap3216c_dev *ddata, enum iio_event_direction dir,
+    int val, int val2) {
+
+    u8 lower_byte = val & AP3216C_PS_THRESHOLD_LOW_MASK;
+    u8 higher_byte = (val >> 2) & 0xff;
+    u8 low_reg, high_reg;
+    int ret;
+    if(val2 != 0 || val < 0 || val > 0x3fff)
+        return -EINVAL;
+
+    if(dir == IIO_EV_DIR_RISING) {
+        low_reg = AP3216C_PS_HIGH_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_PS_HIGH_THRESHOLD_HIGH_REG;
+    }else if(dir == IIO_EV_DIR_FALLING) {
+        low_reg = AP3216C_PS_LOW_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_PS_LOW_THRESHOLD_HIGH_REG;
+    }else {
+        return -EINVAL;
+    }
+
+    mutex_lock(&ddata->lock);
+    ret = i2c_smbus_write_byte_data(ddata->client, low_reg, lower_byte);
+    if(ret < 0) {
+        goto out_unlock;
+    }
+    ret = i2c_smbus_write_byte_data(ddata->client, high_reg, higher_byte);
+    if(ret < 0) {
+        goto out_unlock;
+    }
+    /* write success */
+    ret = 0;
+    out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
 static int ap3216c_write_event_value(struct iio_dev *indio_dev,
         const struct iio_chan_spec *chan, enum iio_event_type type,
         enum iio_event_direction dir, enum iio_event_info info, int val, int val2) {
 
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    switch(chan->address) {
-        case AP3216C_CHANNEL_ALS:
-            switch(type) {
-                case IIO_EV_TYPE_THRESH:
-                    if(info == IIO_EV_INFO_VALUE)
-                        return write_als_threshold(ddata, dir, val, val2);
-            }
+    switch (chan->address) {
+    case AP3216C_CHANNEL_ALS:
+        switch (type) {
+        case IIO_EV_TYPE_THRESH:
+            if (info == IIO_EV_INFO_VALUE)
+                return write_als_threshold(ddata, dir, val, val2);
+            break;
+        default:
+            break;
+        }
+        break;
+    case AP3216C_CHANNEL_PS:
+        switch (type) {
+        case IIO_EV_TYPE_THRESH:
+            if (info == IIO_EV_INFO_VALUE)
+                return write_ps_threshold(ddata, dir, val, val2);
+            break;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
     }
     return -EINVAL;
 }
@@ -144,18 +296,16 @@ static int read_als_threshold(struct ap3216c_dev *ddata,
     int ret = 0;
 
     switch (dir) {
-        case IIO_EV_DIR_RISING:
-            low_reg = AP3216C_ALS_HIGH_THRESHOLD_LOW_REG;
-            high_reg = AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG;
+    case IIO_EV_DIR_RISING:
+        low_reg = AP3216C_ALS_HIGH_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG;
         break;
-
-        case IIO_EV_DIR_FALLING:
-            low_reg = AP3216C_ALS_LOW_THRESHOLD_LOW_REG;
-            high_reg = AP3216C_ALS_LOW_THRESHOLD_HIGH_REG;
+    case IIO_EV_DIR_FALLING:
+        low_reg = AP3216C_ALS_LOW_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_ALS_LOW_THRESHOLD_HIGH_REG;
         break;
-
-        default:
-            return -EINVAL;
+    default:
+        return -EINVAL;
     }
 
     mutex_lock(&ddata->lock);
@@ -180,24 +330,86 @@ out_unlock:
     return ret;
 }
 
+static int read_ps_threshold(struct ap3216c_dev *ddata,
+    enum iio_event_direction dir,
+    int *val, int *val2)
+{
+    u8 low_reg, high_reg;
+    int lower_byte, higher_byte;
+    int ret = 0;
+
+    switch (dir) {
+    case IIO_EV_DIR_RISING:
+        low_reg = AP3216C_PS_HIGH_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_PS_HIGH_THRESHOLD_HIGH_REG;
+        break;
+    case IIO_EV_DIR_FALLING:
+        low_reg = AP3216C_PS_LOW_THRESHOLD_LOW_REG;
+        high_reg = AP3216C_PS_LOW_THRESHOLD_HIGH_REG;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    mutex_lock(&ddata->lock);
+
+    lower_byte = i2c_smbus_read_byte_data(ddata->client, low_reg);
+    if (lower_byte < 0) {
+    ret = lower_byte;
+    goto out_unlock;
+    }
+
+    higher_byte = i2c_smbus_read_byte_data(ddata->client, high_reg);
+    if (higher_byte < 0) {
+    ret = higher_byte;
+    goto out_unlock;
+    }
+
+    *val = (higher_byte << 2) | (lower_byte & AP3216C_PS_THRESHOLD_LOW_MASK);
+    *val2 = 0;
+
+    out_unlock:
+    mutex_unlock(&ddata->lock);
+    return ret;
+}
+
 static int ap3216c_read_event_value(struct iio_dev *indio_dev,
         const struct iio_chan_spec *chan, enum iio_event_type type,
         enum iio_event_direction dir, enum iio_event_info info, int *val, int *val2) {
     
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
     int ret;
-    switch(chan->address) {
-        case AP3216C_CHANNEL_ALS:
-            switch(type) {
-                case IIO_EV_TYPE_THRESH:
-                    if(info == IIO_EV_INFO_VALUE){
-                        ret = read_als_threshold(ddata, dir, val, val2);
-                        if(ret < 0)
-                            return ret;
-                        else
-                            return IIO_VAL_INT;
-                    }
+    switch (chan->address) {
+    case AP3216C_CHANNEL_ALS:
+        switch (type) {
+        case IIO_EV_TYPE_THRESH:
+            if (info == IIO_EV_INFO_VALUE) {
+                ret = read_als_threshold(ddata, dir, val, val2);
+                if (ret < 0)
+                    return ret;
+                return IIO_VAL_INT;
             }
+            break;
+        default:
+            break;
+        }
+        break;
+    case AP3216C_CHANNEL_PS:
+        switch (type) {
+        case IIO_EV_TYPE_THRESH:
+            if (info == IIO_EV_INFO_VALUE) {
+                ret = read_ps_threshold(ddata, dir, val, val2);
+                if (ret < 0)
+                    return ret;
+                return IIO_VAL_INT;
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
     }
     return -EINVAL;
 }
@@ -207,75 +419,90 @@ static int ap3216c_read_raw(struct iio_dev *indio_dev,
 
     int ret;
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-        switch(chan->address) {
-            case AP3216C_CHANNEL_ALS:
-                switch(mask) {
-                    case IIO_CHAN_INFO_RAW:
-                        ret = read_als_data(ddata, val);
-                        if(ret < 0) {
-                            return ret;
-                        }
-                        return IIO_VAL_INT;
-                    case IIO_CHAN_INFO_SCALE:
-                        ret = read_als_scale_microlux(ddata, val, val2);
-                        if(ret < 0) {
-                            return ret;
-                        }
-                        return IIO_VAL_INT_PLUS_MICRO;
-                    default:
-                        return -EINVAL;
-                }
-                return IIO_VAL_INT;
-            case AP3216C_CHANNEL_PS:
-                // read_ps(ddata);
-                return IIO_VAL_INT;
-            case AP3216C_CHANNEL_IR:
-                // read_ir(ddata);
-                return IIO_VAL_INT;
-            default:
-                return -EINVAL;
+
+    switch (chan->address) {
+    case AP3216C_CHANNEL_ALS:
+        switch (mask) {
+        case IIO_CHAN_INFO_RAW:
+            ret = read_als_data(ddata, val);
+            if (ret < 0)
+                return ret;
+            return IIO_VAL_INT;
+        case IIO_CHAN_INFO_SCALE:
+            ret = read_als_scale_microlux(ddata, val, val2);
+            if (ret < 0)
+                return ret;
+            return IIO_VAL_INT_PLUS_MICRO;
+        default:
+            break;
         }
+        break;
+    case AP3216C_CHANNEL_PS:
+        switch (mask) {
+        case IIO_CHAN_INFO_RAW:
+            ret = read_ps_data(ddata, val);
+            if (ret < 0)
+                return ret;
+            return IIO_VAL_INT;
+        default:
+            break;
+        }
+        break;
+    case AP3216C_CHANNEL_IR:
+        switch (mask) {
+        case IIO_CHAN_INFO_RAW:
+            ret = read_ir_data(ddata, val);
+            if (ret < 0)
+                return ret;
+            return IIO_VAL_INT;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
     return -EINVAL;
 }
 
 static int ap3216c_write_raw(struct iio_dev *indio_dev,
         struct iio_chan_spec const *chan, int val, int val2, long mask) {
     
-    int ret;
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-        switch(chan->address) {
-            case AP3216C_CHANNEL_ALS:
-                switch(mask) {
-                    case IIO_CHAN_INFO_SCALE:
-                        return write_als_scale_microlux(ddata, val, val2);
-                }
-                return -EINVAL;
-            case AP3216C_CHANNEL_PS:
-                // write_ps(ddata);
-                return -EINVAL;
-            case AP3216C_CHANNEL_IR:
-                // write_ir(ddata);
-                return -EINVAL;
-            default:
-                return -EINVAL;
+
+    switch (chan->address) {
+    case AP3216C_CHANNEL_ALS:
+        switch (mask) {
+        case IIO_CHAN_INFO_SCALE:
+            return write_als_scale_microlux(ddata, val, val2);
+        default:
+            break;
         }
+        break;
+    case AP3216C_CHANNEL_PS:
+        break;
+    default:
+        break;
+    }
     return -EINVAL;
 }
 
 static int ap3216c_write_raw_get_fmt(struct iio_dev *indio_dev,
         struct iio_chan_spec const *chan, long mask) {
     
-    struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    switch(chan->address) {
-        case AP3216C_CHANNEL_ALS:
-            switch(mask) {
-                case IIO_CHAN_INFO_SCALE:
-                    return IIO_VAL_INT_PLUS_MICRO;
-                case IIO_CHAN_INFO_RAW:
-                    return IIO_VAL_INT;
-                default:
-                    return -EINVAL;
-            }
+    switch (chan->address) {
+    case AP3216C_CHANNEL_ALS:
+        switch (mask) {
+        case IIO_CHAN_INFO_SCALE:
+            return IIO_VAL_INT_PLUS_MICRO;
+        case IIO_CHAN_INFO_RAW:
+            return IIO_VAL_INT;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
     }
     return -EINVAL;
 }
@@ -289,12 +516,13 @@ static ssize_t ap3216c_show_mode(struct device *dev,
     struct i2c_client *client = ddata->client;
     int ret;
 
+    mutex_lock(&ddata->lock);
     ret = i2c_smbus_read_byte_data(client, AP3216C_SYSTEM_CONFIGURATION_REG);
-    if(ret < 0) {
+    mutex_unlock(&ddata->lock);
+    if (ret < 0)
         return ret;
-    }
 
-    ret &= AP3216C_MODE_MASK;
+    ret = FIELD_GET(AP3216C_MODE_MASK, ret);
     return sysfs_emit(buf, "%d\n", ret);
 }
 
@@ -317,6 +545,13 @@ static ssize_t ap3216c_store_mode(struct device *dev,
         return ret;
     }
 
+    /* wait for the mode to be updated. In principle, different wait times.
+     * should be calculated and set based on the configuration, but here we’ve
+     * taken the easy way out and selected the longest conversion time.
+     * If the mode is 0(power down), no need to wait.
+     */
+    if(mode != 0)
+        msleep(250);
     return count;
 }
 
@@ -329,15 +564,20 @@ static ssize_t ap3216c_show_als_persistence(struct device *dev,
     struct iio_dev *indio_dev = dev_to_iio_dev(dev);
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
     struct i2c_client *client = ddata->client;
-    int ret;
+    int ret, i;
 
+    mutex_lock(&ddata->lock);
     ret = i2c_smbus_read_byte_data(client, AP3216C_ALS_CONFIGURATION_REG);
-    if(ret < 0) {
+    mutex_unlock(&ddata->lock);
+    if (ret < 0)
         return ret;
-    }
 
-    ret &= AP3216C_ALS_CONF_PERSIST_MASK;
-    return sysfs_emit(buf, "%d\n", ret);
+    ret = FIELD_GET(AP3216C_ALS_CONF_PERSIST_MASK, ret);
+    for (i = 0; i < ARRAY_SIZE(ap3216c_als_persistence); i++) {
+        if (ret == ap3216c_als_persistence[i].reg_code)
+            return sysfs_emit(buf, "%d\n", ap3216c_als_persistence[i].value);
+    }
+    return -EINVAL;
 }
 
 static ssize_t ap3216c_store_als_persistence(struct device *dev,
@@ -381,7 +621,7 @@ static irqreturn_t ap3216c_irq_handler(int irq, void *dev_id) {
 static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
     struct iio_dev *indio_dev = dev_id;
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    int irq_status, ret;
+    int irq_status, ret, PS_OBJ, PS_INT_DIR;
 
     mutex_lock(&ddata->lock);
     irq_status = i2c_smbus_read_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG);
@@ -410,9 +650,26 @@ static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
                             IIO_EV_TYPE_THRESH,
                             IIO_EV_DIR_EITHER),
                             ddata->irq_timestamp);
-    }else if(irq_status & AP3216C_PS_INT_MASK) {
-        i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_PS_INT_MASK);
-        /* placeholder for PS interrupt handler*/
+    }
+    
+    if(irq_status & AP3216C_PS_INT_MASK) {
+        ret |= i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_PS_INT_MASK);
+        PS_OBJ = i2c_smbus_read_byte_data(ddata->client, AP3216C_PS_DATA_LOW_REG);
+        if(PS_OBJ < 0)
+            goto out_unlock;
+        else
+            PS_OBJ &= AP3216C_PS_OBJ_MASK;
+
+        if(PS_OBJ == 0)
+            PS_INT_DIR = IIO_EV_DIR_RISING;
+        else
+            PS_INT_DIR = IIO_EV_DIR_FALLING;
+        iio_push_event(indio_dev,
+            IIO_UNMOD_EVENT_CODE(IIO_PROXIMITY,
+                            0,
+                            IIO_EV_TYPE_THRESH,
+                            PS_INT_DIR),
+                            ddata->irq_timestamp);
     }
 
     if(ret) {
@@ -421,6 +678,7 @@ static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
             ret);
     }
 
+out_unlock:
     mutex_unlock(&ddata->lock);
     return IRQ_HANDLED;
 }
@@ -471,6 +729,8 @@ static const struct iio_chan_spec ap3216c_channels[] = {
         .channel = 0,
         .address = AP3216C_CHANNEL_PS,
         .info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+        .event_spec = ap3216c_event_spec,
+        .num_event_specs = ARRAY_SIZE(ap3216c_event_spec),
     },
     {
         .type = IIO_INTENSITY,
@@ -484,8 +744,8 @@ static const struct iio_chan_spec ap3216c_channels[] = {
 
 static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *id) {
     struct device *dev = &client->dev;
-    if(!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
-        dev_err(dev, "I2C adapter doesn't support I2C functionality\n");
+    if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA)) {
+        dev_err(dev, "I2C adapter doesn't support SMBus byte data\n");
         return -EOPNOTSUPP;
     }
 
@@ -520,15 +780,28 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     if (ret)
         return dev_err_probe(dev, ret, "failed to register IIO device\n");
     
-    ret = devm_request_threaded_irq(dev, client->irq, ap3216c_irq_handler, ap3216c_irq_thread_fn,
-                                    IRQF_ONESHOT, "ap3216c", indio_dev);
-    if (ret)
-        return dev_err_probe(dev, ret, "failed to request IRQ\n");
+    if (client->irq > 0) {
+        ret = devm_request_threaded_irq(dev, client->irq, ap3216c_irq_handler,
+                        ap3216c_irq_thread_fn, IRQF_ONESHOT,
+                        "ap3216c", indio_dev);
+        if (ret)
+            return dev_err_probe(dev, ret, "failed to request IRQ\n");
+    }
 
     return 0;
 }
 
 static int ap3216c_remove(struct i2c_client *client) {
+    struct iio_dev *indio_dev = i2c_get_clientdata(client);
+    struct ap3216c_dev *ddata = iio_priv(indio_dev);
+    int ret;
+
+    /* I2C client and mutex are still valid here; devm_* teardown runs after remove(). */
+    ret = ap3216c_update_field(ddata, AP3216C_SYSTEM_CONFIGURATION_REG,
+                   AP3216C_MODE_MASK, 0);
+    if (ret)
+        dev_err(&client->dev, "failed to power down: %d\n", ret);
+
     return 0;
 }
 /* Platform Data ID table */
@@ -542,6 +815,7 @@ static const struct of_device_id ap3216c_DT_id[] = {
     { .compatible = "smartchai,ap3216c", .data = &ap3216c_chip},
     { }
 };
+MODULE_DEVICE_TABLE(of, ap3216c_DT_id);
 
 static struct i2c_driver ap3216c_driver = {
     .driver = {
