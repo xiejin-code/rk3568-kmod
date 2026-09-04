@@ -9,7 +9,7 @@
 /* System Register Table*/
 #define AP3216C_SYSTEM_CONFIGURATION_REG        0x00
 #define AP3216C_INTERRUPT_STATUS_REG            0x01
-#define AP3216C_CLEAR_INT_REG                   0x02
+#define AP3216C_CLEAR_INT_MANNER_REG            0x02
 #define AP3216C_IR_DATA_LOW_REG                 0x0A
 #define AP3216C_IR_DATA_HIGH_REG                0x0B
 #define AP3216C_ALS_DATA_LOW_REG                0x0C
@@ -50,6 +50,7 @@
 #define AP3216C_PS_OBJ_MASK                     BIT(7)
 #define AP3216C_ALS_INT_MASK                    BIT(0)
 #define AP3216C_PS_INT_MASK                     BIT(1)
+#define AP3216C_CLEAR_INT_MANNER_MASK           BIT(0)
 
 enum ap3216c_channel_addr {
     AP3216C_CHANNEL_ALS,

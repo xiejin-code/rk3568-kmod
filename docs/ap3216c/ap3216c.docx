@@ -1,0 +1,159 @@
+数据手册：
+    传感器数据的获取：
+        ALS：只启用环境光检测
+        ALS = Ambient Light Sensor
+        每次测量需要100ms
+
+        PS+IR：启用接近检测和红外检测
+        PS = Proximity Sensor，IR = Infrared
+        每次测量需要12.5ms
+
+        ALS+PS+IR：同时启用环境光、接近检测、红外检测
+        需等待112.5ms才能出数据。
+
+        PD：掉电/低功耗模式
+        PD = Power Down
+
+        ALS once：只进行一次环境光测量，测完后停止
+        耗时2.5倍连续读取时间：250ms（ALS + ALS + 50ms间隔），ALS 数据会保持，不清除。怎么清除呢？等再次测量之后更新？
+
+        SW Reset：软件复位
+        通过写寄存器让芯片内部复位
+        需等待10ms
+
+        PS+IR once：只进行一次接近/红外测量，测完后停止
+        耗时2.5倍连续读取时间：32ms（ 12.5 + 12.5 + 7ms间隔）， 数据会保持，不清除。怎么清除呢？
+
+        ALS+PS+IR once：三个功能都只测一次，测完后停止
+        232 ms； 12.5+100+12.5+100+7， 数据会保持，不清除。怎么清除呢？
+    
+    IR DATA REGISTER :
+        IR值较高时PS值无效，IR_OF位决定PS是否有效。1代表 PS（接近）值无效。
+        必须先读低字节，再读高字节。
+
+    ALS DATA REGISTER :
+        必须先读低字节，再读高字节。
+
+    PS DATA REGISTER :
+        必须先读低字节，再读高字节。
+        OBJ位置1代表物体很近，PS超过阈值；0表示远离，PS低于阈值。IR_OF位置1表示PS数据无效。
+
+    /***ALS Register Table***/
+    AP3216C_ALS_CONFIGURATION_REG ： 光照检测范围 和 连续几次超过阈值触发硬件中断
+    AP3216C_ALS_CALIBRATION_REG ： 该传感器经常装在有遮盖的玻璃或者背板后，所以需要增益补偿。
+    AP3216C_ALS_LOW_THRESHOLD_LOW_REG ~ AP3216C_ALS_HIGH_THRESHOLD_HIGH_REG ： 阈值高低位寄存器
+
+读取时间间隔应当在哪一个层面实施？
+
+1. 应当有个函数，支持设置mode ： 
+
+2. read raw 的实现 和 probe 里是否需要goto分支处理失败时资源的释放
+
+2026/08/29
+3 ALS 数据读取、量程读写 已经设置。 用IIO事件阈值配置实现 读写 ALS 上下限阈值。自定义属性实现ALS连续中断次数设置。中断注册完毕，
+    没有业务需求，线程只做了清中断操作。且注意，该芯片没有INT数据锁存功能，所以中断来临后用户空间去读有可能读到的并不是中断发生时
+    的数据。
+    没实现ALS 的calibration
+
+4 IR PS 的读取, PS的中断。IR data其实用不上，先只做个read raw的就行。 PS实现data read,且在IR_OF 1时，PS数据无效; 越近，红外反射的越多，ADC值越大。
+    PS的INT mode 有两种模式， 默认模式是2，INT和OBJ位绑定，中断发生时读OBJ即可。 我们采用默认模式且不放开INT mode的配置，因为这会在驱动里增加较多代码。
+    用IIO事件阈值配置实现 读写 PS 上下限阈值。
+    下面寄存器未暴露出来，均使用默认值
+    /***PS Register Table***/
+    0x20  AP3216C_PS_CONFIGURATION_REG     PS Configuration（默认 0x05）
+          作用：PS 积分时间、增益、中断滤波（persist）
+          bit7:4  PS/IR Integration time   1T~16T，加长可提高 PS/IR ADC 分辨率和灵敏度（默认 1T）
+          bit3:2  PS gain                  1/2/4/8，加大增益可拉远探测距离，噪声和串扰也会增加（默认 2）
+          bit1:0  PS persist               连续 M 次转换后才触发 PS INT；M=1/2/4/8（默认 2）
+
+    0x21  AP3216C_PS_LED_DRIVER_REG        PS LED Control（默认 0x13）
+          作用：控制接近检测用的 IR LED
+          bit5:4  LED pulse                一次 PS 转换闪 0/1/2/3 次（默认 1）；次数越多越耗电、探测越远
+          bit1:0  LED driver ratio         灯电流 16.7%/33.3%/66.7%/100%（默认 100%，典型 110 mA）
+
+    0x22  AP3216C_PS_INT_FORM_REG          PS INT Mode / PS INT Form（默认 0x01）
+          作用：选择 PS 中断算法
+          bit0    PS_Algo                  0 = Mode 1 Zone（越出高低阈窗口即中断）
+                                           1 = Mode 2 Hysteresis（默认，OBJ 近/远翻转才中断）
+
+    0x23  AP3216C_PS_MEAN_TIME_REG         PS Mean Time（默认 0x00）
+          作用：PS 平均/积分时长，也是 0x24 等待时间的单位
+          bit1:0  Mean_time                00=12.5ms（默认）  01=25ms  10=37.5ms  11=50ms
+
+    0x24  AP3216C_PS_LED_WAITING_TIME_REG  PS LED Waiting Time（默认 0x00）
+          作用：两次 PS 转换之间 LED 等待几个 mean time，拉长可省电但响应变慢
+          bit5:0  PS LED waiting           0=不等待（默认）  1~63=等待 N 个 mean time
+
+    0x28  AP3216C_PS_CALIBRATION_LOW_REG   PS Calibration L（默认 0x00）
+          作用：盖板/玻璃串扰补偿的最低位 PS_Cal[0]；与 0x29（PS_Cal[8:1]）拼成 9-bit
+          扣掉装配串扰后，不同板子可用同一套 PS 阈值
+
+5 不同模式下的读取间隔怎么控制，驱动层控制？IIO buffer机制
+
+6 对照 AP3216C.pdf（Rev 0.86）尚未实现 / 未暴露的功能
+    对照基准：src/ap3216c/ap3216c.c、ap3216c.h（2026-09-04）
+    已实现（不列入下面）：mode 读写；ALS/PS/IR raw；ALS scale；ALS persist；
+    ALS/PS 阈值（IIO events）；IRQ 清状态并 push event；remove 掉电；
+    probe 将 0x02 INT Clear Manner 写成 1（软件清，见第 7 点）。
+
+    6.1 手册有寄存器、驱动完全没做
+        0x19  ALS Calibration
+              盖板/窗口损耗补偿，因子 = 寄存器值/64（默认 0x40 = 1.0）
+              笔记第 3 点已记录「没实现 ALS calibration」
+
+    6.2 手册有寄存器、笔记里明确暂不暴露（保持芯片默认值）
+        0x20  PS Configuration（默认 0x05）
+              bit7:4  PS/IR 积分时间 1T~16T
+              bit3:2  PS gain 1/2/4/8
+              bit1:0  PS persist 1/2/4/8 次转换才报 INT
+        0x21  PS LED Driver（默认 0x13）
+              bit5:4  LED 脉冲次数；bit1:0 灯电流比例（100% 约 110 mA）
+        0x22  PS INT Form（默认 0x01 = Mode 2 滞回）
+              Mode 1 Zone 明确不做
+        0x23  PS Mean Time（默认 0x00 = 12.5 ms）
+        0x24  PS LED Waiting Time（默认 0x00 = 不等待）
+        0x28 / 0x29  PS Calibration（9-bit 串扰补偿，默认 0）
+
+    6.3 手册有、只做了一部分
+        System Mode（0x00）
+              8 种 mode 都能 echo 进 sysfs，除 PD 外仍一律 msleep(250)，未按手册区分
+              ALS 100 ms / PS 12.5 ms / 双开 112.5 ms / once 250、32、232 ms
+              SW reset（mode=4）：写完后再 msleep(20)，然后写回 mode=0（PD）
+              未在复位后重写 0x02=1，芯片会回到默认清中断方式 0
+        0x02  INT Clear Manner
+              手册：0=读 data 自动清（上电默认）；1=写 0x01 对应 bit 软件清
+              probe 在注册 IIO / 申请 IRQ 之前写成 1；IRQ 只写 0x01 清标志，不再改 0x02
+              未做成 sysfs；SW reset 后会回到默认 0，当前没有再写成 1
+        IR_OF
+              只在读 PS 时若 0x0E bit6=1 返回 -ENODATA
+              未把 0x0A bit7 / OBJ 作为独立 IIO 通道或 sysfs 暴露
+        ALS 中断方向
+              硬件用高低阈区分越上沿/越下沿，IRQ 一律 push IIO_EV_DIR_EITHER
+              用户空间无法从事件里区分是高阈还是低阈
+        probe
+              不上电、不写默认 mode，芯片保持 Power Down，直到用户 echo mode
+        IIO 事件开关
+              无 read/write_event_config，无法用 in_*_thresh_*_en 开关中断
+
+    6.4 IIO / 框架层未接（手册无对应寄存器，但是驱动能力缺口）
+        IIO buffer / triggered buffer
+              无法一次 atomic 取出同一轮 ALS+PS+IR；笔记第 5 点仍开放
+        IIO_CHAN_INFO_SAMP_FREQ
+              采样周期由 mode + 0x23/0x24 决定，未映射成 sampling_frequency
+        PS/IR 无 scale
+              手册 PS ADC↔距离为 TBD，IR 无 lux 公式；只报 count 是合理的
+        DT / 绑定文档
+              本仓库无 dts 示例（slave 0x1E、INT 低有效、I2C Fast 400 kHz）
+
+    6.5 手册里的硬件能力、不需要驱动做成配置项
+        内置温度补偿、50/60 Hz anti-flicker、封装/回流焊尺寸
+        I2C 时序（Standard / Fast 400 kHz）由 adapter + DT 保证
+
+2026/09/04
+7 probe 在 mutex_init 之后、devm_iio_device_register / request_irq 之前，
+    把 0x02 INT Clear Manner 写成 1（软件清：随后写 0x01 的 ALS/PS bit 清标志）。
+    不暴露给 sysfs。手册默认是 0（读 data 自动清）；写成 1 是驱动策略，不是芯片上电值。
+    IRQ 线程只向 0x01 写 ALS/PS 状态 bit 清中断，不再每次写 0x02。
+    store_mode：echo 4（SW reset）后额外等 20 ms（手册要求复位期间约 10 ms 不要发命令），
+    再写 mode=0 回到 PD。复位会把寄存器打回默认，当前没有把 0x02 再写成 1。
+

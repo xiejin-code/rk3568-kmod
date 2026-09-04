@@ -226,7 +226,7 @@ static int write_ps_threshold(struct ap3216c_dev *ddata, enum iio_event_directio
     u8 higher_byte = (val >> 2) & 0xff;
     u8 low_reg, high_reg;
     int ret;
-    if(val2 != 0 || val < 0 || val > 0x3fff)
+    if(val2 != 0 || val < 0 || val > 0x3ff)
         return -EINVAL;
 
     if(dir == IIO_EV_DIR_RISING) {
@@ -516,9 +516,7 @@ static ssize_t ap3216c_show_mode(struct device *dev,
     struct i2c_client *client = ddata->client;
     int ret;
 
-    mutex_lock(&ddata->lock);
     ret = i2c_smbus_read_byte_data(client, AP3216C_SYSTEM_CONFIGURATION_REG);
-    mutex_unlock(&ddata->lock);
     if (ret < 0)
         return ret;
 
@@ -531,7 +529,7 @@ static ssize_t ap3216c_store_mode(struct device *dev,
     
     struct iio_dev *indio_dev = dev_to_iio_dev(dev);
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    u8 mode;
+    u8 mode, POWER_DOWN_MODE = 0, SW_RESET_MODE = 4;
     int ret;
 
     ret = kstrtou8(buf, 0, &mode);
@@ -550,8 +548,16 @@ static ssize_t ap3216c_store_mode(struct device *dev,
      * taken the easy way out and selected the longest conversion time.
      * If the mode is 0(power down), no need to wait.
      */
-    if(mode != 0)
+    if(mode != POWER_DOWN_MODE)
         msleep(250);
+    if(mode == SW_RESET_MODE){
+        /*give more time to wait for the SW reset to be completed. */
+        msleep(20);
+        ret = ap3216c_update_field(ddata, AP3216C_CLEAR_INT_MANNER_REG, AP3216C_CLEAR_INT_MANNER_MASK, 0);
+        if(ret < 0) {
+            dev_err(&ddata->client->dev, "failed to set clear interrupt manner: %d\n", ret);
+        }
+    }
     return count;
 }
 
@@ -566,9 +572,7 @@ static ssize_t ap3216c_show_als_persistence(struct device *dev,
     struct i2c_client *client = ddata->client;
     int ret, i;
 
-    mutex_lock(&ddata->lock);
     ret = i2c_smbus_read_byte_data(client, AP3216C_ALS_CONFIGURATION_REG);
-    mutex_unlock(&ddata->lock);
     if (ret < 0)
         return ret;
 
@@ -621,7 +625,7 @@ static irqreturn_t ap3216c_irq_handler(int irq, void *dev_id) {
 static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
     struct iio_dev *indio_dev = dev_id;
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
-    int irq_status, ret, PS_OBJ, PS_INT_DIR;
+    int irq_status, ret = 0, PS_OBJ, PS_INT_DIR;
 
     mutex_lock(&ddata->lock);
     irq_status = i2c_smbus_read_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG);
@@ -633,17 +637,11 @@ static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
         return IRQ_HANDLED;
     }
 
-    /* clear the interrupt status register AP3216C_INTERRUPT_STATUS_REG.
-     * There are two ways to clear the interrupt status:
-     * 1. Write 1 to the interrupt status register AP3216C_CLEAR_INT_REG. Then write
-     * mask to the interrupt status register AP3216C_INTERRUPT_STATUS_REG.
-     * 2. Read the data register(AP3216C_ALS_DATA_*_REG or AP3216C_PS_DATA_*_REG) if
-     * the AP3216C_CLEAR_INT_REG is 0, the interrupt status will be cleared automatically.
-    */
-    /* We use No.1 method to clear the interrupt status */
-    ret = i2c_smbus_write_byte_data(ddata->client, AP3216C_CLEAR_INT_REG, 1);
+    /* 0x02 INT Clear Manner is set to 1 in probe (software clear).
+     * Clear flags by writing the corresponding bits to 0x01.
+     */
     if(irq_status & AP3216C_ALS_INT_MASK) {
-        ret |=i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_ALS_INT_MASK);
+        ret = i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_ALS_INT_MASK);
         iio_push_event(indio_dev,
             IIO_UNMOD_EVENT_CODE(IIO_LIGHT,
                             0,
@@ -653,17 +651,17 @@ static irqreturn_t ap3216c_irq_thread_fn(int irq, void *dev_id) {
     }
     
     if(irq_status & AP3216C_PS_INT_MASK) {
-        ret |= i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_PS_INT_MASK);
+        ret = i2c_smbus_write_byte_data(ddata->client, AP3216C_INTERRUPT_STATUS_REG, AP3216C_PS_INT_MASK);
         PS_OBJ = i2c_smbus_read_byte_data(ddata->client, AP3216C_PS_DATA_LOW_REG);
         if(PS_OBJ < 0)
             goto out_unlock;
         else
             PS_OBJ &= AP3216C_PS_OBJ_MASK;
 
-        if(PS_OBJ == 0)
-            PS_INT_DIR = IIO_EV_DIR_RISING;
-        else
+        if(PS_OBJ == 0)//near --> away, fall threshold
             PS_INT_DIR = IIO_EV_DIR_FALLING;
+        else//away --> near, rise threshold
+            PS_INT_DIR = IIO_EV_DIR_RISING;
         iio_push_event(indio_dev,
             IIO_UNMOD_EVENT_CODE(IIO_PROXIMITY,
                             0,
@@ -774,6 +772,12 @@ static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *
     /* register the device private data to the client */
     i2c_set_clientdata(client, indio_dev);
     mutex_init(&ddata->lock);
+
+    /* 0x02 = 1: software clear; IRQ writes 0x01 bits to deassert INT. */
+    ret = ap3216c_update_field(ddata, AP3216C_CLEAR_INT_MANNER_REG, AP3216C_CLEAR_INT_MANNER_MASK, 1);
+    if(ret < 0) {
+        dev_err(dev, "failed to set clear interrupt manner: %d\n", ret);
+    }
 
     /* register the IIO device */
     ret = devm_iio_device_register(dev, indio_dev);
