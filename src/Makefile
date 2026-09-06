@@ -8,6 +8,6 @@ endif
 # KERNEL_SRC=${STAGING_KERNEL_DIR}, O=${STAGING_KERNEL_BUILDDIR}
 # M=$(CURDIR) points Kbuild to this external module tree.
 modules clean modules_install:
-	$(MAKE) -C "$(KERNEL_SOURCE)" O="$(O)" M="$(CURDIR)" CF="-D__CHECK_ENDIAN__" $(@)
+	$(MAKE) -C "$(KERNEL_SRC)" O="$(O)" M="$(CURDIR)" CF="-D__CHECK_ENDIAN__" $(@)
 
 .PHONY: modules clean modules_install

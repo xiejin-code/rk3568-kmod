@@ -42,14 +42,17 @@ static const struct ap3216c_chip_info ap3216c_chip = {
     .id = AP3216_DEVICE_ID,
 };
 
-static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, const int mask, int value) {
+static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, int mask, int value) {
     
-    int ret;
+    int ret, shift;
     u8 reg_value;
     struct i2c_client *client = ddata->client;
 
     /* check if the value is within the mask */
-    if (!FIELD_FIT(mask, value))
+    if (!mask)
+        return -EINVAL;
+    shift = __ffs(mask);
+    if (value & ~(mask >> shift))
         return -EINVAL;
 
     mutex_lock(&ddata->lock);
@@ -58,7 +61,7 @@ static int ap3216c_update_field(struct ap3216c_dev *ddata, int reg, const int ma
         goto out_unlock;
     }
 
-    reg_value = (ret & ~mask) | FIELD_PREP(mask, value);
+    reg_value = (ret & ~mask) | ((value << shift) & mask);
     ret = i2c_smbus_write_byte_data(client, reg, reg_value);
     if(ret < 0) {
         goto out_unlock;
@@ -171,11 +174,12 @@ out_unlock:
 }
 
 static int write_als_scale_microlux(struct ap3216c_dev *ddata, int val, int val2) {
-    
+    int i;
+
     if (val != 0)
         return -EINVAL;
 
-    for (int i = 0; i < ARRAY_SIZE(ap3216c_als_scale_microlux); i++) {
+    for (i = 0; i < ARRAY_SIZE(ap3216c_als_scale_microlux); i++) {
         if (val2 == ap3216c_als_scale_microlux[i])
             return ap3216c_update_field(ddata, AP3216C_ALS_CONFIGURATION_REG,
                 AP3216C_ALS_CONF_RANGE_MASK, i);
@@ -591,13 +595,14 @@ static ssize_t ap3216c_store_als_persistence(struct device *dev,
     struct ap3216c_dev *ddata = iio_priv(indio_dev);
     u8 als_persistence;
     int ret;
+    int i;
 
     ret = kstrtou8(buf, 0, &als_persistence);
     if(ret < 0) {
         return ret;
     }
 
-    for (int i = 0; i < ARRAY_SIZE(ap3216c_als_persistence); i++) {
+    for (i = 0; i < ARRAY_SIZE(ap3216c_als_persistence); i++) {
         if (als_persistence == ap3216c_als_persistence[i].value){
             ret = ap3216c_update_field(ddata, AP3216C_ALS_CONFIGURATION_REG,
                 AP3216C_ALS_CONF_PERSIST_MASK, ap3216c_als_persistence[i].reg_code);
@@ -742,14 +747,14 @@ static const struct iio_chan_spec ap3216c_channels[] = {
 
 static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *id) {
     struct device *dev = &client->dev;
+    int ret;
+    struct ap3216c_dev *ddata;
+    struct iio_dev *indio_dev;
+
     if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA)) {
         dev_err(dev, "I2C adapter doesn't support SMBus byte data\n");
         return -EOPNOTSUPP;
     }
-
-    int ret;
-    struct ap3216c_dev *ddata;
-    struct iio_dev *indio_dev;
     /* Use IIO device api to request IIO dev object and request extra memory for the device private data */
     indio_dev = devm_iio_device_alloc(dev, sizeof(struct ap3216c_dev));
     if(!indio_dev) {
