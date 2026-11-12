@@ -1,0 +1,2 @@
+# Only generate yt8531c.o. Use yt8531c.o to generate yt8531c.ko
+obj-m := yt8531c.o
